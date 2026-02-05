@@ -1,0 +1,151 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "liveedge"
+version = "0.1.0"
+description = "Energy-efficient livestock behavior monitoring with behavior-driven adaptive sampling"
+readme = "README.md"
+license = {text = "MIT"}
+requires-python = ">=3.9"
+authors = [
+    {name = "LiveEdge Team"}
+]
+keywords = [
+    "machine-learning",
+    "edge-computing",
+    "livestock-monitoring",
+    "adaptive-sampling",
+    "behavior-classification",
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+
+dependencies = [
+    # Data processing
+    "numpy>=1.21.0",
+    "pandas>=1.4.0",
+    "scipy>=1.8.0",
+    "PyWavelets>=1.3.0",  # For wavelet denoising filtering
+
+    # Machine learning
+    "scikit-learn>=1.0.0",
+    "xgboost>=1.6.0",
+
+    # Deep learning
+    "torch>=1.12.0",
+    "pytorch-lightning>=1.8.0",
+
+    # Reinforcement learning
+    "stable-baselines3>=1.6.0",
+    "gymnasium>=0.28.0",
+
+    # Configuration
+    "hydra-core>=1.3.0",
+    "omegaconf>=2.3.0",
+
+    # Visualization
+    "matplotlib>=3.5.0",
+    "seaborn>=0.12.0",
+
+    # Utilities
+    "tqdm>=4.64.0",
+    "rich>=12.0.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0.0",
+    "pytest-cov>=4.0.0",
+    "black>=22.0.0",
+    "ruff>=0.0.260",
+    "mypy>=0.990",
+    "pre-commit>=2.20.0",
+]
+notebooks = [
+    "jupyter>=1.0.0",
+    "ipywidgets>=8.0.0",
+]
+all = [
+    "liveedge[dev,notebooks]",
+]
+
+[project.urls]
+Repository = "https://github.com/liveedge/liveedge"
+Documentation = "https://liveedge.readthedocs.io"
+
+[project.scripts]
+liveedge-train = "liveedge.scripts.train_classifier:main"
+liveedge-simulate = "liveedge.scripts.run_simulation:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.black]
+line-length = 100
+target-version = ["py39", "py310", "py311"]
+include = '\.pyi?$'
+exclude = '''
+/(
+    \.eggs
+  | \.git
+  | \.hg
+  | \.mypy_cache
+  | \.tox
+  | \.venv
+  | _build
+  | buck-out
+  | build
+  | dist
+)/
+'''
+
+[tool.ruff]
+line-length = 100
+target-version = "py39"
+select = [
+    "E",   # pycodestyle errors
+    "W",   # pycodestyle warnings
+    "F",   # pyflakes
+    "I",   # isort
+    "C",   # flake8-comprehensions
+    "B",   # flake8-bugbear
+    "UP",  # pyupgrade
+]
+ignore = [
+    "E501",  # line too long (handled by black)
+    "B008",  # do not perform function calls in argument defaults
+    "C901",  # too complex
+]
+
+[tool.ruff.per-file-ignores]
+"__init__.py" = ["F401"]  # unused imports in __init__.py
+
+[tool.mypy]
+python_version = "3.9"
+warn_return_any = true
+warn_unused_configs = true
+ignore_missing_imports = true
+exclude = [
+    "tests",
+    "notebooks",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_functions = ["test_*"]
+addopts = "-v --cov=liveedge --cov-report=term-missing"
+
+[tool.coverage.run]
+source = ["src/liveedge"]
+omit = ["*/tests/*", "*/__init__.py"]

@@ -1,0 +1,232 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# C extensions
+*.so
+
+# Distribution / packaging
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# PyInstaller
+*.manifest
+*.spec
+
+# Installer logs
+pip-log.txt
+pip-delete-this-directory.txt
+
+# Unit test / coverage reports
+htmlcov/
+.tox/
+.nox/
+.coverage
+.coverage.*
+.cache
+nosetests.xml
+coverage.xml
+*.cover
+*.py,cover
+.hypothesis/
+.pytest_cache/
+
+# Translations
+*.mo
+*.pot
+
+# Django stuff:
+*.log
+local_settings.py
+db.sqlite3
+db.sqlite3-journal
+
+# Flask stuff:
+instance/
+.webassets-cache
+
+# Scrapy stuff:
+.scrapy
+
+# Sphinx documentation
+docs/_build/
+
+# PyBuilder
+.pybuilder/
+target/
+
+# Jupyter Notebook
+.ipynb_checkpoints
+
+# IPython
+profile_default/
+ipython_config.py
+
+# pyenv
+.python-version
+
+# pipenv
+Pipfile.lock
+
+# PEP 582
+__pypackages__/
+
+# Celery stuff
+celerybeat-schedule
+celerybeat.pid
+
+# SageMath parsed files
+*.sage.py
+
+# Environments
+.env
+.venv
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+
+# Spyder project settings
+.spyderproject
+.spyproject
+
+# Rope project settings
+.ropeproject
+
+# mkdocs documentation
+/site
+
+# mypy
+.mypy_cache/
+.dmypy.json
+dmypy.json
+
+# Pyre type checker
+.pyre/
+
+# pytype static type analyzer
+.pytype/
+
+# Cython debug symbols
+cython_debug/
+
+# VS Code
+.vscode/
+
+# PyCharm
+.idea/
+
+# Hydra outputs
+outputs/
+multirun/
+
+# Data directories (keep README)
+data/raw/*
+data/processed/*
+data/splits/*
+!data/raw/README.md
+!data/processed/README.md
+!data/splits/README.md
+!data/README.md
+
+# Model outputs
+outputs/models/*
+outputs/logs/*
+outputs/figures/*
+outputs/results/*
+!outputs/models/.gitkeep
+!outputs/logs/.gitkeep
+!outputs/figures/.gitkeep
+!outputs/results/.gitkeep
+
+# Temporary files
+*.tmp
+*.temp
+*.bak
+*~
+
+# OS files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Secrets
+*.pem
+*.key
+secrets.yaml
+secrets.yml
+
+# ==============================================================================
+# LiveEdge Project-Specific Ignores
+# ==============================================================================
+
+# Paper LaTeX files (managed separately on Overleaf)
+docs/paper/
+
+# Deprecated code folder
+deprecated/
+
+# Claude Code sessions and instructions
+.claude/
+CLAUDE.md
+
+# Large data files
+data/raw/
+data/processed/
+data/downsampled/
+data/reports/
+data/splits/
+!data/README.md
+
+# Trained models (large, regenerable)
+models/
+
+# Renode hardware simulation
+renode/
+
+# Notebooks (exploratory)
+notebooks/
+
+# Tools (one-off utilities)
+tools/
+
+# Experiment outputs (regenerable)
+outputs/
+
+# Temporary/test files
+nul
+*.test.png
+wavelet_filtering_test.png
+
+# Old documentation files
+LIVEEDGE_CODE_AGENT_PROMPT.md
+WAVELET_EXPERIMENT_QUICKSTART.md
+Energy-Efficient-Bio-Integrated-SJ-CFP.pdf
+
+# Old experiment docs
+docs/experiments/
+docs/api/
+docs/experiments.md
+docs/supplementary.md
