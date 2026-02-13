@@ -346,25 +346,14 @@ def run_cluster_accuracy_comparison(n_folds: int = 5,
 
     models_config = {
         'Random Forest': {'type': 'traditional', 'behavior_cls': RandomForestClassifier(
-            n_estimators=100, max_depth=20, class_weight='balanced', random_state=42, n_jobs=-1),
-            'cluster_cls': RandomForestClassifier(
-            n_estimators=100, max_depth=15, class_weight='balanced', random_state=42, n_jobs=-1)},
+            n_estimators=100, max_depth=20, class_weight='balanced', random_state=42, n_jobs=-1)},
         'Decision Tree': {'type': 'traditional', 'behavior_cls': DecisionTreeClassifier(
-            max_depth=20, class_weight='balanced', random_state=42),
-            'cluster_cls': DecisionTreeClassifier(
-            max_depth=15, class_weight='balanced', random_state=42)},
+            max_depth=20, class_weight='balanced', random_state=42)},
         'SVM (Linear)': {'type': 'traditional', 'behavior_cls': LinearSVC(
-            class_weight='balanced', random_state=42, max_iter=5000),
-            'cluster_cls': LinearSVC(
             class_weight='balanced', random_state=42, max_iter=5000)},
         'Logistic Regression': {'type': 'traditional', 'behavior_cls': LogisticRegression(
-            max_iter=1000, class_weight='balanced', random_state=42, n_jobs=-1),
-            'cluster_cls': LogisticRegression(
             max_iter=1000, class_weight='balanced', random_state=42, n_jobs=-1)},
         'XGBoost': {'type': 'traditional', 'behavior_cls': XGBClassifier(
-            n_estimators=100, max_depth=10, learning_rate=0.1,
-            random_state=42, n_jobs=-1, tree_method='hist', verbosity=0),
-            'cluster_cls': XGBClassifier(
             n_estimators=100, max_depth=10, learning_rate=0.1,
             random_state=42, n_jobs=-1, tree_method='hist', verbosity=0)},
         '1D-CNN': {'type': 'dl', 'class': CNN1D},
@@ -406,8 +395,6 @@ def run_cluster_accuracy_comparison(n_folds: int = 5,
         X_val_gpu = torch.FloatTensor(X_val_norm).to(DEVICE)
         y_train_beh_gpu = torch.LongTensor(y_train_behavior).to(DEVICE)
         y_val_beh_gpu = torch.LongTensor(y_val_behavior).to(DEVICE)
-        y_train_cl_gpu = torch.LongTensor(y_train_cluster).to(DEVICE)
-        y_val_cl_gpu = torch.LongTensor(y_val_cluster).to(DEVICE)
 
         for name, config in models_config.items():
             print(f"    {name}...", end=" ", flush=True)
@@ -422,28 +409,27 @@ def run_cluster_accuracy_comparison(n_folds: int = 5,
                         X_train_scaled = scaler_feat.fit_transform(X_train_feat)
                         X_val_scaled = scaler_feat.transform(X_val_feat)
 
-                    # Behavior classifier
+                    # Behavior classifier only
                     clf_behavior = clone(config['behavior_cls'])
                     clf_behavior.fit(X_train_scaled, y_train_behavior)
                     pred_behavior = clf_behavior.predict(X_val_scaled)
 
-                    # Cluster classifier
-                    clf_cluster = clone(config['cluster_cls'])
-                    clf_cluster.fit(X_train_scaled, y_train_cluster)
-                    pred_cluster = clf_cluster.predict(X_val_scaled)
+                    # Derive cluster predictions via deterministic mapping
+                    pred_behavior_str = le_behavior.inverse_transform(pred_behavior)
+                    pred_cluster_str = np.array([BEHAVIOR_TO_CLUSTER[b] for b in pred_behavior_str])
+                    pred_cluster = le_cluster.transform(pred_cluster_str)
 
                 else:
-                    # DL model - train on behavior task (data on GPU)
+                    # DL model - train on behavior task only (data on GPU)
                     model_behavior = config['class'](n_channels=N_CHANNELS, n_classes=5)
                     pred_behavior = train_dl_model_gpu(
                         model_behavior, X_train_gpu, y_train_beh_gpu,
                         X_val_gpu, y_val_beh_gpu)
 
-                    # DL model - train on cluster task (data on GPU)
-                    model_cluster = config['class'](n_channels=N_CHANNELS, n_classes=3)
-                    pred_cluster = train_dl_model_gpu(
-                        model_cluster, X_train_gpu, y_train_cl_gpu,
-                        X_val_gpu, y_val_cl_gpu)
+                    # Derive cluster predictions via deterministic mapping
+                    pred_behavior_str = le_behavior.inverse_transform(pred_behavior)
+                    pred_cluster_str = np.array([BEHAVIOR_TO_CLUSTER[b] for b in pred_behavior_str])
+                    pred_cluster = le_cluster.transform(pred_cluster_str)
 
                 # Calculate metrics
                 behavior_acc = accuracy_score(y_val_behavior, pred_behavior)
@@ -463,7 +449,6 @@ def run_cluster_accuracy_comparison(n_folds: int = 5,
 
         # Free GPU memory between folds
         del X_train_gpu, X_val_gpu, y_train_beh_gpu, y_val_beh_gpu
-        del y_train_cl_gpu, y_val_cl_gpu
         torch.cuda.empty_cache()
 
     # Aggregate results
@@ -517,34 +502,6 @@ def print_table7_format(results: Dict):
                   f"{r['behavior_f1_mean']*100:>10.2f}% | {mcu:>6}")
 
 
-def compare_with_paper(results: Dict):
-    """Compare computed cluster accuracy with paper claims."""
-    print("\n" + "=" * 70)
-    print("PAPER CLAIM VERIFICATION (Table 7)")
-    print("=" * 70)
-
-    paper_claims = {
-        'RF + Features': {'behavior': 79.24, 'cluster': 82.40},
-        '1D-CNN': {'behavior': 81.22, 'cluster': 85.29},
-        'DeepConvLSTM': {'behavior': 80.38, 'cluster': 83.51},
-        'GRU': {'behavior': 80.14, 'cluster': 83.27},
-        'ResNet-1D': {'behavior': 79.97, 'cluster': 83.09},
-        'LSTM': {'behavior': 79.87, 'cluster': 82.98},
-        'Transformer': {'behavior': 75.59, 'cluster': 78.72},
-    }
-
-    print(f"\n{'Model':<20} | {'Paper Cluster':>14} | {'Computed':>14} | {'Δ':>8} | {'Status':>8}")
-    print("-" * 70)
-
-    for name, paper in paper_claims.items():
-        if name in results:
-            comp = results[name]['cluster_accuracy_mean'] * 100
-            delta = comp - paper['cluster']
-            status = "OK" if abs(delta) < 2.0 else "DIFF"
-            print(f"{name:<20} | {paper['cluster']:>13.2f}% | {comp:>13.2f}% | "
-                  f"{delta:>+7.2f} | {status:>8}")
-
-
 def main():
     import argparse
     parser = argparse.ArgumentParser()
@@ -555,7 +512,6 @@ def main():
     results = run_cluster_accuracy_comparison(n_folds=5, ml_only=args.ml_only)
 
     print_table7_format(results)
-    compare_with_paper(results)
 
     # Save results
     def convert_numpy(obj):

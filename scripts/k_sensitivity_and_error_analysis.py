@@ -2,11 +2,11 @@
 """
 k Sensitivity Analysis and Cluster Misclassification Impact Analysis
 
-Methodology aligned with verified_simulation.py:
-- Cluster classifier: compressed RF (30 trees, depth 8, balanced)
-- Behavior classifier: RF (100, depth 20, min_samples_split=5, min_samples_leaf=2, NO balanced)
-- FSM uses current-ODR features for cluster prediction (not fixed 50Hz)
-- Scalers fitted per-fold on 50Hz training features
+Methodology aligned with verified_simulation.py (single classifier architecture):
+- Single behavior classifier: RF (100, depth 20, min_samples_split=5, min_samples_leaf=2)
+- Cluster assignments via deterministic behavior->cluster mapping
+- FSM uses current-ODR features for behavior prediction -> cluster mapping
+- Single scaler fitted per-fold on 50Hz training features
 - 5-fold temporal-order CV (no shuffle)
 """
 
@@ -231,20 +231,17 @@ def run_k_sensitivity_analysis(X: np.ndarray, y: np.ndarray,
                                 k_values: List[int] = [1, 2, 3, 4, 5]) -> Dict:
     """Analyze sensitivity of k on energy-accuracy-delay trade-off.
 
-    Methodology matches verified_simulation.py:
-    - Scalers fitted per-fold on 50Hz train features
-    - Behavior RF: 100 trees, depth 20, NO balanced
-    - Cluster RF: 30 trees, depth 8, balanced (compressed)
-    - FSM uses current-ODR features for prediction
+    Single classifier architecture (matches verified_simulation.py):
+    - Single behavior RF: 100 trees, depth 20
+    - Cluster predictions derived via deterministic behavior->cluster mapping
+    - Single scaler fitted per-fold on 50Hz training features
+    - FSM uses current-ODR features for behavior prediction -> cluster mapping
     """
     print("\n" + "=" * 70)
     print("Experiment 1: k Sensitivity Analysis")
     print("=" * 70)
 
     y_cluster = np.array([BEHAVIOR_TO_CLUSTER[b] for b in y])
-
-    le_cluster = LabelEncoder()
-    y_cluster_encoded = le_cluster.fit_transform(y_cluster)
 
     le_behavior = LabelEncoder()
     y_behavior_encoded = le_behavior.fit_transform(y)
@@ -254,49 +251,38 @@ def run_k_sensitivity_analysis(X: np.ndarray, y: np.ndarray,
 
     fold_results = {k: [] for k in k_values}
 
-    for fold, (train_idx, val_idx) in enumerate(cv.split(X, y_cluster_encoded)):
+    for fold, (train_idx, val_idx) in enumerate(cv.split(X, y_cluster)):
         X_train, X_val = X[train_idx], X[val_idx]
 
         # Extract 50Hz training features
         X_train_features = extract_features(X_train)
 
-        # Fit scalers per fold on 50Hz training features
-        scaler_behavior = StandardScaler()
-        scaler_behavior.fit(X_train_features)
+        # Single scaler per fold
+        scaler = StandardScaler()
+        scaler.fit(X_train_features)
 
-        scaler_cluster = StandardScaler()
-        scaler_cluster.fit(X_train_features)
-
-        # Train behavior classifier (matches verified_simulation.py: NO balanced)
+        # Train single behavior classifier (matches verified_simulation.py)
         clf_behavior = RandomForestClassifier(
             n_estimators=100, max_depth=20,
             min_samples_split=5, min_samples_leaf=2,
             random_state=42, n_jobs=-1
         )
-        clf_behavior.fit(scaler_behavior.transform(X_train_features),
+        clf_behavior.fit(scaler.transform(X_train_features),
                          y_behavior_encoded[train_idx])
 
-        # Train cluster classifier (compressed, matches verified_simulation.py)
-        clf_cluster = RandomForestClassifier(
-            n_estimators=30, max_depth=8,
-            class_weight='balanced',
-            random_state=42, n_jobs=-1
-        )
-        clf_cluster.fit(scaler_cluster.transform(X_train_features),
-                        y_cluster_encoded[train_idx])
-
-        # Pre-compute predictions at all ODRs (matches verified_simulation.py)
+        # Pre-compute predictions at all ODRs
+        # Behavior predictions -> deterministic cluster mapping
         cluster_preds_cache = {}
         behavior_preds_cache = {}
         for odr in CLUSTER_ODR.values():
             X_resampled = resample_batch(X_val, odr)
             features = extract_features(X_resampled)
 
-            cluster_pred_encoded = clf_cluster.predict(scaler_cluster.transform(features))
-            cluster_preds_cache[odr] = le_cluster.inverse_transform(cluster_pred_encoded)
-
-            behavior_pred_encoded = clf_behavior.predict(scaler_behavior.transform(features))
-            behavior_preds_cache[odr] = le_behavior.inverse_transform(behavior_pred_encoded)
+            behavior_pred_encoded = clf_behavior.predict(scaler.transform(features))
+            behavior_preds = le_behavior.inverse_transform(behavior_pred_encoded)
+            behavior_preds_cache[odr] = behavior_preds
+            # Deterministic cluster mapping from behavior predictions
+            cluster_preds_cache[odr] = np.array([BEHAVIOR_TO_CLUSTER[b] for b in behavior_preds])
 
         y_true_clusters = y_cluster[val_idx]
         y_true_behavior = y[val_idx]
@@ -354,7 +340,7 @@ def run_k_sensitivity_analysis(X: np.ndarray, y: np.ndarray,
 def analyze_misclassification_impact(X: np.ndarray, y: np.ndarray) -> Dict:
     """Analyze cascading effects of cluster misclassification.
 
-    Uses 50Hz features for raw classifier confusion matrix analysis.
+    Uses behavior classifier + deterministic mapping at 50Hz.
     This measures classifier capability, not FSM runtime performance.
     """
     print("\n" + "=" * 70)
@@ -362,30 +348,32 @@ def analyze_misclassification_impact(X: np.ndarray, y: np.ndarray) -> Dict:
     print("=" * 70)
 
     y_cluster = np.array([BEHAVIOR_TO_CLUSTER[b] for b in y])
+    cluster_names = np.unique(y_cluster)
 
     # Extract features
     X_features = extract_features(X)
-    scaler = StandardScaler()
-    X_scaled = scaler.fit_transform(X_features)
 
-    le_cluster = LabelEncoder()
-    y_cluster_encoded = le_cluster.fit_transform(y_cluster)
-    cluster_names = le_cluster.classes_
+    le_behavior = LabelEncoder()
+    y_behavior_encoded = le_behavior.fit_transform(y)
 
-    # Compressed cluster classifier (matching paper)
+    # Full behavior classifier + deterministic cluster mapping
     clf = RandomForestClassifier(
-        n_estimators=30, max_depth=8,
-        class_weight='balanced', random_state=42, n_jobs=-1
+        n_estimators=100, max_depth=20,
+        min_samples_split=5, min_samples_leaf=2,
+        random_state=42, n_jobs=-1
     )
 
     cv = StratifiedKFold(n_splits=5, shuffle=False)
-    y_pred_all = np.zeros_like(y_cluster_encoded)
+    y_pred_clusters = np.empty(len(y), dtype='<U10')
 
-    for train_idx, val_idx in cv.split(X_scaled, y_cluster_encoded):
-        clf.fit(X_scaled[train_idx], y_cluster_encoded[train_idx])
-        y_pred_all[val_idx] = clf.predict(X_scaled[val_idx])
+    for train_idx, val_idx in cv.split(X_features, y_cluster):
+        scaler = StandardScaler()
+        X_train_scaled = scaler.fit_transform(X_features[train_idx])
+        X_val_scaled = scaler.transform(X_features[val_idx])
 
-    y_pred_clusters = le_cluster.inverse_transform(y_pred_all)
+        clf.fit(X_train_scaled, y_behavior_encoded[train_idx])
+        y_pred_bh = le_behavior.inverse_transform(clf.predict(X_val_scaled))
+        y_pred_clusters[val_idx] = np.array([BEHAVIOR_TO_CLUSTER[b] for b in y_pred_bh])
 
     # Analyze misclassification patterns
     print("\n  Misclassification Analysis:")

@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-"""ODR state trajectory figure."""
+"""ODR state trajectory figure.
+
+Uses single behavior classifier RF(100, d=20) + deterministic cluster mapping,
+matching the main paper architecture.
+"""
 
 import sys
 from pathlib import Path
@@ -14,6 +18,7 @@ sys.path.insert(0, str(_project_root / 'src'))
 
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.preprocessing import LabelEncoder, StandardScaler
+from liveedge.data import extract_24_features_batch
 
 OUTPUT_DIR = Path("L:/GitHub/LiveEdge/outputs/paper_revision/figures")
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
@@ -45,39 +50,11 @@ CLUSTER_COLORS = {
 WINDOW_DURATION = 1.5  # seconds
 
 
-def extract_features(X: np.ndarray) -> np.ndarray:
-    """Extract 24 simple features."""
-    if X.ndim == 2:
-        X = X[np.newaxis, ...]
-
-    n_windows, n_samples, n_channels = X.shape
-    n_features = n_channels * 7 + 3
-    features = np.zeros((n_windows, n_features))
-
-    idx = 0
-    for ch in range(n_channels):
-        channel_data = X[:, :, ch]
-        features[:, idx] = np.mean(channel_data, axis=1)
-        features[:, idx+1] = np.std(channel_data, axis=1)
-        features[:, idx+2] = np.min(channel_data, axis=1)
-        features[:, idx+3] = np.max(channel_data, axis=1)
-        features[:, idx+4] = np.percentile(channel_data, 25, axis=1)
-        features[:, idx+5] = np.percentile(channel_data, 75, axis=1)
-        features[:, idx+6] = np.sqrt(np.mean(channel_data**2, axis=1))
-        idx += 7
-
-    acc_mag = np.sqrt(X[:, :, 0]**2 + X[:, :, 1]**2 + X[:, :, 2]**2)
-    features[:, idx] = np.mean(acc_mag, axis=1)
-    features[:, idx+1] = np.std(acc_mag, axis=1)
-    features[:, idx+2] = np.max(acc_mag, axis=1) - np.min(acc_mag, axis=1)
-
-    return features
-
-
 def simulate_trajectory(X: np.ndarray, y_labels: np.ndarray, k_stability: int = 3):
     """
     Simulate LiveEdge trajectory on data.
 
+    Uses single behavior classifier + deterministic cluster mapping.
     Returns ground truth clusters, predicted clusters, and ODR settings.
     """
     # Encode labels
@@ -85,34 +62,32 @@ def simulate_trajectory(X: np.ndarray, y_labels: np.ndarray, k_stability: int = 
     y_behavior_encoded = le_behavior.fit_transform(y_labels)
 
     y_cluster = np.array([BEHAVIOR_TO_CLUSTER[b] for b in y_labels])
-    le_cluster = LabelEncoder()
-    y_cluster_encoded = le_cluster.fit_transform(y_cluster)
 
     # Use 80% for training
     n_train = int(len(X) * 0.8)
     X_train, X_test = X[:n_train], X[n_train:]
     y_train_behavior = y_behavior_encoded[:n_train]
-    y_train_cluster = y_cluster_encoded[:n_train]
     y_test_cluster_str = y_cluster[n_train:]
 
-    # Train classifiers
-    X_train_feat = extract_features(X_train)
+    # Train single behavior classifier
+    X_train_feat = extract_24_features_batch(X_train)
     scaler = StandardScaler()
     X_train_scaled = scaler.fit_transform(X_train_feat)
 
-    cluster_clf = RandomForestClassifier(
-        n_estimators=100, max_depth=15,
-        class_weight='balanced', random_state=42, n_jobs=-1
+    behavior_clf = RandomForestClassifier(
+        n_estimators=100, max_depth=20,
+        min_samples_split=5, min_samples_leaf=2,
+        random_state=42, n_jobs=-1
     )
-    cluster_clf.fit(X_train_scaled, y_train_cluster)
+    behavior_clf.fit(X_train_scaled, y_train_behavior)
 
-    # Test features
-    X_test_feat = extract_features(X_test)
+    # Predict behaviors, map to clusters
+    X_test_feat = extract_24_features_batch(X_test)
     X_test_scaled = scaler.transform(X_test_feat)
 
-    # Predict
-    pred_cluster_encoded = cluster_clf.predict(X_test_scaled)
-    pred_cluster_str = le_cluster.inverse_transform(pred_cluster_encoded)
+    pred_behavior_encoded = behavior_clf.predict(X_test_scaled)
+    pred_behavior_str = le_behavior.inverse_transform(pred_behavior_encoded)
+    pred_cluster_str = np.array([BEHAVIOR_TO_CLUSTER[b] for b in pred_behavior_str])
 
     # Apply FSM with k-stability
     current_cluster = None

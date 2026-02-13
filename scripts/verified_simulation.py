@@ -1,5 +1,11 @@
 #!/usr/bin/env python3
-"""LiveEdge simulation with FSM controller and k-hysteresis."""
+"""LiveEdge simulation with FSM controller and k-hysteresis.
+
+Architecture: Single behavior classifier → deterministic cluster mapping.
+- Full model RF(100, d=20) for baseline evaluation
+- Compressed model RF(30, d=8, balanced) for MCU deployment + FSM simulation
+- Cluster assignments derived from behavior predictions via deterministic mapping
+"""
 
 import sys
 from pathlib import Path
@@ -94,31 +100,25 @@ def compute_energy(odr_distribution: Dict[float, float],
 
 
 def run_liveedge_simulation(X_test, y_test_behavior_str,
-                            behavior_classifier, cluster_classifier,
-                            scaler_behavior, scaler_cluster,
-                            label_encoder_behavior, label_encoder_cluster,
+                            behavior_classifier, scaler,
+                            label_encoder_behavior,
                             k_stability=3):
-    """Run LiveEdge simulation with FSM controller."""
+    """Run LiveEdge simulation with single behavior classifier + deterministic cluster mapping."""
     n_samples = len(X_test)
 
-    # Pre-compute features at all ODRs
+    # Pre-compute features and behavior predictions at all ODRs
     print("    Pre-computing features at all ODRs...", end=" ", flush=True)
-    features_cache = {}
+    behavior_preds_cache = {}
+    cluster_preds_cache = {}
     for odr in CLUSTER_ODR.values():
         X_resampled = resample_batch(X_test, odr)
         features = extract_features(X_resampled)
-        features_cache[odr] = {
-            'cluster': scaler_cluster.transform(features),
-            'behavior': scaler_behavior.transform(features)
-        }
-
-    cluster_preds_cache = {}
-    behavior_preds_cache = {}
-    for odr, feats in features_cache.items():
-        pred_indices = cluster_classifier.predict(feats['cluster'])
-        cluster_preds_cache[odr] = label_encoder_cluster.inverse_transform(pred_indices)
-        pred_indices = behavior_classifier.predict(feats['behavior'])
-        behavior_preds_cache[odr] = label_encoder_behavior.inverse_transform(pred_indices)
+        features_scaled = scaler.transform(features)
+        pred_indices = behavior_classifier.predict(features_scaled)
+        behavior_preds = label_encoder_behavior.inverse_transform(pred_indices)
+        behavior_preds_cache[odr] = behavior_preds
+        # Deterministic cluster mapping from behavior predictions
+        cluster_preds_cache[odr] = np.array([BEHAVIOR_TO_CLUSTER[b] for b in behavior_preds])
     print("Done")
 
     # FSM State
@@ -167,9 +167,9 @@ def run_liveedge_simulation(X_test, y_test_behavior_str,
 
     classes = label_encoder_behavior.classes_
     per_class_f1 = {}
-    f1_scores = f1_score(y_test_behavior_str, predictions, average=None, labels=classes)
+    f1_scores_arr = f1_score(y_test_behavior_str, predictions, average=None, labels=classes)
     for i, cls in enumerate(classes):
-        per_class_f1[cls] = round(f1_scores[i], 4)
+        per_class_f1[cls] = round(f1_scores_arr[i], 4)
 
     return {
         'accuracy': round(accuracy, 4),
@@ -186,7 +186,8 @@ def run_liveedge_simulation(X_test, y_test_behavior_str,
 
 def main():
     print("=" * 70)
-    print("LiveEdge Simulation")
+    print("LiveEdge Simulation (Single Classifier Architecture)")
+    print("  Behavior classifier → deterministic cluster mapping")
     print("=" * 70)
 
     print("\n[1] Loading data...")
@@ -202,82 +203,73 @@ def main():
     label_encoder_behavior = LabelEncoder()
     y_behavior_encoded = label_encoder_behavior.fit_transform(y)
 
+    # Cluster labels only needed for stratification and evaluation
     y_cluster_labels = np.array([BEHAVIOR_TO_CLUSTER[b] for b in y])
-    label_encoder_cluster = LabelEncoder()
-    y_cluster_encoded = label_encoder_cluster.fit_transform(y_cluster_labels)
 
     print(f"  Behaviors: {list(label_encoder_behavior.classes_)}")
-    print(f"  Clusters: {list(label_encoder_cluster.classes_)}")
 
     print("\n[2] Running 5-fold cross-validation...")
     cv = StratifiedKFold(n_splits=5, shuffle=False)
 
     all_results = defaultdict(list)
 
-    for fold, (train_idx, test_idx) in enumerate(cv.split(X, y_cluster_encoded)):
+    for fold, (train_idx, test_idx) in enumerate(cv.split(X, y_cluster_labels)):
         print(f"\n  --- Fold {fold + 1}/5 ---")
 
         X_train, X_test = X[train_idx], X[test_idx]
         y_train_behavior = y_behavior_encoded[train_idx]
         y_test_behavior = y_behavior_encoded[test_idx]
-        y_train_cluster = y_cluster_encoded[train_idx]
         y_test_behavior_str = label_encoder_behavior.inverse_transform(y_test_behavior)
 
         X_train_features = extract_features(X_train)
-        scaler_behavior = StandardScaler()
-        X_train_scaled = scaler_behavior.fit_transform(X_train_features)
+        scaler = StandardScaler()
+        X_train_scaled = scaler.fit_transform(X_train_features)
 
-        behavior_classifier = RandomForestClassifier(
+        # Full behavior classifier (for baseline evaluation)
+        behavior_clf_full = RandomForestClassifier(
             n_estimators=100, max_depth=20,
             min_samples_split=5, min_samples_leaf=2,
             random_state=42, n_jobs=-1
         )
-        behavior_classifier.fit(X_train_scaled, y_train_behavior)
+        behavior_clf_full.fit(X_train_scaled, y_train_behavior)
 
-        scaler_cluster = StandardScaler()
-        X_train_cluster_scaled = scaler_cluster.fit_transform(X_train_features)
-
-        # Full cluster classifier for baseline evaluation
-        cluster_classifier_full = RandomForestClassifier(
-            n_estimators=100, max_depth=15,
-            class_weight='balanced',
-            random_state=42, n_jobs=-1
-        )
-        cluster_classifier_full.fit(X_train_cluster_scaled, y_train_cluster)
-
-        # Compressed RF for LiveEdge MCU deployment (30 trees, depth 8, 132KB)
-        cluster_classifier = RandomForestClassifier(
+        # Compressed behavior classifier (for MCU deployment / FSM simulation)
+        behavior_clf_compressed = RandomForestClassifier(
             n_estimators=30, max_depth=8,
             class_weight='balanced',
             random_state=42, n_jobs=-1
         )
-        cluster_classifier.fit(X_train_cluster_scaled, y_train_cluster)
+        behavior_clf_compressed.fit(X_train_scaled, y_train_behavior)
 
         X_test_features = extract_features(X_test)
-        X_test_cluster_scaled = scaler_cluster.transform(X_test_features)
-
-        # Direct cluster accuracy @50Hz (compressed model)
-        pred_cluster_indices = cluster_classifier.predict(X_test_cluster_scaled)
-        pred_clusters = label_encoder_cluster.inverse_transform(pred_cluster_indices)
+        X_test_scaled = scaler.transform(X_test_features)
         true_clusters = [BEHAVIOR_TO_CLUSTER[b] for b in y_test_behavior_str]
-        cluster_acc_50hz = accuracy_score(true_clusters, pred_clusters)
-        all_results['cluster_accuracy_50hz'].append(cluster_acc_50hz)
 
-        # Direct cluster accuracy @50Hz (full model)
-        pred_cluster_full = label_encoder_cluster.inverse_transform(
-            cluster_classifier_full.predict(X_test_cluster_scaled))
-        cluster_acc_full = accuracy_score(true_clusters, pred_cluster_full)
+        # Cluster accuracy @50Hz via behavior→cluster mapping
+        pred_bh_full = label_encoder_behavior.inverse_transform(
+            behavior_clf_full.predict(X_test_scaled))
+        cluster_acc_full = accuracy_score(
+            true_clusters, [BEHAVIOR_TO_CLUSTER[b] for b in pred_bh_full])
         all_results['cluster_accuracy_50hz_full'].append(cluster_acc_full)
-        print(f"    Cluster Acc @50Hz: compressed={cluster_acc_50hz*100:.2f}%, "
+
+        pred_bh_comp = label_encoder_behavior.inverse_transform(
+            behavior_clf_compressed.predict(X_test_scaled))
+        cluster_acc_comp = accuracy_score(
+            true_clusters, [BEHAVIOR_TO_CLUSTER[b] for b in pred_bh_comp])
+        all_results['cluster_accuracy_50hz'].append(cluster_acc_comp)
+
+        print(f"    Cluster Acc @50Hz (mapped): compressed={cluster_acc_comp*100:.2f}%, "
               f"full={cluster_acc_full*100:.2f}%")
 
+        # Baselines at each ODR (using full behavior classifier)
         for odr, name in [(50, 'baseline_50hz'), (25, 'baseline_25hz'),
                           (12.5, 'baseline_12.5hz'), (10, 'baseline_10hz'),
                           (6.25, 'baseline_6.25hz')]:
             X_resampled = resample_batch(X_test, odr)
             features = extract_features(X_resampled)
-            features_scaled = scaler_behavior.transform(features)
-            pred_indices = behavior_classifier.predict(features_scaled)
+            features_scaled = scaler.transform(features)
+            # Behavior accuracy (full model for baselines)
+            pred_indices = behavior_clf_full.predict(features_scaled)
             predictions = label_encoder_behavior.inverse_transform(pred_indices)
             acc = accuracy_score(y_test_behavior_str, predictions)
             all_results[name].append(acc)
@@ -285,36 +277,26 @@ def main():
             pred_clusters_mapped = [BEHAVIOR_TO_CLUSTER[b] for b in predictions]
             cluster_acc = accuracy_score(true_clusters, pred_clusters_mapped)
             all_results[f'{name}_cluster'].append(cluster_acc)
-            # Direct cluster accuracy (full model at each ODR)
-            features_cluster = scaler_cluster.transform(features)
-            pred_cl = label_encoder_cluster.inverse_transform(
-                cluster_classifier_full.predict(features_cluster))
-            all_results[f'{name}_cluster_direct'].append(
-                accuracy_score(true_clusters, pred_cl))
 
-        # LiveEdge FSM with full cluster classifier (Table 4 main results)
-        result = run_liveedge_simulation(
+        # LiveEdge FSM with full behavior classifier (reference)
+        result_full = run_liveedge_simulation(
             X_test, y_test_behavior_str,
-            behavior_classifier, cluster_classifier_full,
-            scaler_behavior, scaler_cluster,
-            label_encoder_behavior, label_encoder_cluster,
+            behavior_clf_full, scaler, label_encoder_behavior,
             k_stability=3
         )
-        all_results['liveedge_k3'].append(result)
-        print(f"    LiveEdge k=3 (full): Acc={result['accuracy']*100:.2f}%, "
-              f"Cluster={result['cluster_accuracy']*100:.2f}%, "
-              f"ODR={result['eff_odr']:.1f}Hz, "
-              f"Energy={result['energy']['e_total']:.0f}mJ")
+        all_results['liveedge_k3'].append(result_full)
+        print(f"    LiveEdge k=3 (full): Acc={result_full['accuracy']*100:.2f}%, "
+              f"Cluster={result_full['cluster_accuracy']*100:.2f}%, "
+              f"ODR={result_full['eff_odr']:.1f}Hz, "
+              f"Energy={result_full['energy']['e_total']:.0f}mJ")
 
-        # LiveEdge FSM with compressed cluster classifier (HW validation)
+        # LiveEdge FSM with compressed behavior classifier (deployment model)
         result_compressed = run_liveedge_simulation(
             X_test, y_test_behavior_str,
-            behavior_classifier, cluster_classifier,
-            scaler_behavior, scaler_cluster,
-            label_encoder_behavior, label_encoder_cluster,
+            behavior_clf_compressed, scaler, label_encoder_behavior,
             k_stability=3
         )
-        all_results.setdefault('liveedge_k3_compressed', []).append(result_compressed)
+        all_results['liveedge_k3_compressed'].append(result_compressed)
         print(f"    LiveEdge k=3 (compressed): Acc={result_compressed['accuracy']*100:.2f}%, "
               f"Cluster={result_compressed['cluster_accuracy']*100:.2f}%, "
               f"ODR={result_compressed['eff_odr']:.1f}Hz, "
@@ -325,17 +307,18 @@ def main():
     print("=" * 70)
 
     summary = {
+        'architecture': 'single behavior classifier + deterministic cluster mapping',
         'cluster_mapping': BEHAVIOR_TO_CLUSTER,
         'cluster_odr': CLUSTER_ODR,
         'baselines': {},
         'liveedge': {},
         'cluster_accuracy_at_50hz': {
-            'mean': round(np.mean(all_results['cluster_accuracy_50hz']), 4),
-            'std': round(np.std(all_results['cluster_accuracy_50hz']), 4)
+            'compressed_mapped': round(np.mean(all_results['cluster_accuracy_50hz']), 4),
+            'full_mapped': round(np.mean(all_results['cluster_accuracy_50hz_full']), 4),
         }
     }
 
-    # Compute baseline energy dynamically using energy model (T_inf from Renode DWT)
+    # Compute baseline energy
     baseline_energy = {}
     baseline_battery = {}
     for odr in [50, 25, 12.5, 10, 6.25]:
@@ -343,34 +326,32 @@ def main():
         baseline_energy[odr] = round(e['e_total'])
         baseline_battery[odr] = round(e['battery_days'])
 
-    print(f"\n{'Method':<15} | {'Behav Acc':>12} | {'Cl(map)':>8} | {'Cl(direct)':>10} | {'Energy':>8} | {'Batt':>6}")
-    print("-" * 80)
+    print(f"\n{'Method':<15} | {'Behav Acc':>12} | {'Cl(mapped)':>10} | {'Energy':>8} | {'Batt':>6}")
+    print("-" * 65)
 
     for odr, name in [(50, 'baseline_50hz'), (25, 'baseline_25hz'),
                       (12.5, 'baseline_12.5hz'), (10, 'baseline_10hz'),
                       (6.25, 'baseline_6.25hz')]:
         accs = all_results[name]
         cluster_map = all_results[f'{name}_cluster']
-        cluster_direct = all_results[f'{name}_cluster_direct']
         mean_acc = np.mean(accs)
         std_acc = np.std(accs)
         mean_cl_map = np.mean(cluster_map)
-        mean_cl_dir = np.mean(cluster_direct)
         summary['baselines'][name] = {
             'accuracy_mean': round(mean_acc, 4),
             'accuracy_std': round(std_acc, 4),
             'cluster_accuracy_mapped': round(mean_cl_map, 4),
-            'cluster_accuracy_direct': round(mean_cl_dir, 4),
             'energy': baseline_energy[odr],
             'battery': baseline_battery[odr],
             'odr': odr
         }
         print(f"B_{odr}Hz{'':<7} | {mean_acc*100:>6.2f}% ±{std_acc*100:.2f}% | "
-              f"{mean_cl_map*100:>6.2f}% | {mean_cl_dir*100:>8.2f}% | "
+              f"{mean_cl_map*100:>8.2f}% | "
               f"{baseline_energy[odr]:>6} mJ | {baseline_battery[odr]:>4}d")
 
-    print("-" * 75)
+    print("-" * 65)
 
+    # Full model LiveEdge results (reference)
     results = all_results['liveedge_k3']
     accs = [r['accuracy'] for r in results]
     cluster_accs = [r['cluster_accuracy'] for r in results]
@@ -383,7 +364,6 @@ def main():
         'accuracy_mean': round(np.mean(accs), 4),
         'accuracy_std': round(np.std(accs), 4),
         'cluster_accuracy_mean': round(np.mean(cluster_accs), 4),
-        'cluster_accuracy_std': round(np.std(cluster_accs), 4),
         'eff_odr_mean': round(np.mean(odrs), 2),
         'energy_mean': round(np.mean(energies), 1),
         'battery_mean': round(np.mean(batteries), 1),
@@ -392,11 +372,11 @@ def main():
         'k': 3
     }
 
-    print(f"LiveEdge k=3{'':<8} | {np.mean(accs)*100:>6.2f}% +/- {np.std(accs)*100:.2f}% | "
-          f"{np.mean(cluster_accs)*100:>6.2f}% | "
-          f"{np.mean(energies):>8.0f} mJ | {np.mean(batteries):>8.0f}d")
+    print(f"LiveEdge (full)  | {np.mean(accs)*100:>6.2f}% ±{np.std(accs)*100:.2f}% | "
+          f"{np.mean(cluster_accs)*100:>8.2f}% | "
+          f"{np.mean(energies):>6.0f} mJ | {np.mean(batteries):>4.0f}d")
 
-    # Compressed model results (for HW validation section)
+    # Compressed model results (for main paper results)
     results_comp = all_results['liveedge_k3_compressed']
     comp_accs = [r['accuracy'] for r in results_comp]
     comp_cluster = [r['cluster_accuracy'] for r in results_comp]
@@ -407,6 +387,7 @@ def main():
 
     summary['liveedge_compressed'] = {
         'accuracy_mean': round(np.mean(comp_accs), 4),
+        'accuracy_std': round(np.std(comp_accs), 4),
         'cluster_accuracy_mean': round(np.mean(comp_cluster), 4),
         'eff_odr_mean': round(np.mean(comp_odrs), 2),
         'energy_mean': round(np.mean(comp_energies), 1),
@@ -414,32 +395,29 @@ def main():
         'inference_rate_mean': round(np.mean(comp_inf_rates), 4),
         'savings_vs_50hz': round((1 - np.mean(comp_energies) / baseline_energy[50]) * 100, 1),
     }
-    print(f"LiveEdge (comp){'':<5} | {np.mean(comp_accs)*100:>6.2f}% +/- {np.std(comp_accs)*100:.2f}% | "
-          f"{np.mean(comp_cluster)*100:>6.2f}% | "
-          f"{np.mean(comp_energies):>8.0f} mJ | {np.mean(comp_batteries):>8.0f}d")
+    print(f"LiveEdge (comp)  | {np.mean(comp_accs)*100:>6.2f}% ±{np.std(comp_accs)*100:.2f}% | "
+          f"{np.mean(comp_cluster)*100:>8.2f}% | "
+          f"{np.mean(comp_energies):>6.0f} mJ | {np.mean(comp_batteries):>4.0f}d")
 
     # ========================================================================
-    # Ablation Analysis (Table 5)
+    # Ablation Analysis (Table 6)
     # ========================================================================
     print("\n" + "=" * 70)
-    print("ABLATION STUDY (Table 5)")
+    print("ABLATION STUDY (Table 6)")
     print("=" * 70)
 
-    # Energy components computed from model with T_inf from Renode DWT
     E_OVERHEAD = 589  # mJ/day (BLE + RTC + regulator)
     E_IMU_50 = 27 * 3.0 * 86400 / 1000  # 6998 mJ/day
 
-    # Compute E_MCU for 100% inference baseline
     n_windows_day = T_DAY / T_WINDOW
     t_active_baseline = n_windows_day * T_INFERENCE
     t_idle_baseline = T_DAY - t_active_baseline
     E_MCU_BASELINE = (t_active_baseline * I_MCU_ACTIVE + t_idle_baseline * I_MCU_IDLE) * V / 1000
 
-    # A0: Baseline (Fixed 50Hz, 100% inference)
     a0_total = round(E_IMU_50 + E_MCU_BASELINE + E_OVERHEAD)
 
-    # LiveEdge ODR distribution (from compressed model FSM simulation - matches Table 4)
-    le_odr_dists = [r['odr_distribution'] for r in results_comp]
+    # LiveEdge ODR distribution (from full model FSM, matches Table 6 caption)
+    le_odr_dists = [r['odr_distribution'] for r in results]
     avg_odr_dist = {}
     for dist in le_odr_dists:
         for odr_str, frac in dist.items():
@@ -449,12 +427,11 @@ def main():
     # A1: Adaptive ODR only (100% inference)
     i_imu_avg = sum(BMI160_CURRENT.get(odr, 10) * frac for odr, frac in avg_odr_dist.items())
     a1_e_imu = i_imu_avg * 3.0 * 86400 / 1000
-    a1_e_mcu = E_MCU_BASELINE  # 100% inference
+    a1_e_mcu = E_MCU_BASELINE
     a1_total = a1_e_imu + a1_e_mcu + E_OVERHEAD
 
     # A2: Fixed 50Hz + stability-based inference
-    avg_inf_rate = np.mean(comp_inf_rates)  # Use compressed model inference rate
-    # MCU energy with reduced inference
+    avg_inf_rate = np.mean(inference_rates)
     n_windows = 86400 / 1.5
     n_inf = n_windows * avg_inf_rate
     t_active = n_inf * T_INFERENCE
@@ -481,18 +458,22 @@ def main():
         'A3': {'e_imu': round(a3_e_imu), 'e_mcu': round(a3_e_mcu), 'e_total': round(a3_total)},
     }
 
+    # ========================================================================
+    # Key Metrics Summary
+    # ========================================================================
     print("\n" + "=" * 70)
     print("KEY METRICS")
     print("=" * 70)
 
     le = summary['liveedge']
     lc = summary['liveedge_compressed']
-    print(f"\n  Cluster Acc @50Hz (compressed 30-tree): {summary['cluster_accuracy_at_50hz']['mean']*100:.2f}%")
-    print(f"  Cluster Acc @50Hz (full 100-tree): {np.mean(all_results['cluster_accuracy_50hz_full'])*100:.2f}%")
-    print(f"  Cluster Acc @50Hz (behav→cluster map): {summary['baselines']['baseline_50hz']['cluster_accuracy_mapped']*100:.2f}%")
+    print(f"\n  Cluster Acc @50Hz (compressed, mapped): "
+          f"{summary['cluster_accuracy_at_50hz']['compressed_mapped']*100:.2f}%")
+    print(f"  Cluster Acc @50Hz (full, mapped): "
+          f"{summary['cluster_accuracy_at_50hz']['full_mapped']*100:.2f}%")
 
-    print(f"\n  --- Main Results (Compressed Model, Table 4) ---")
-    print(f"  Behavior Accuracy: {lc['accuracy_mean']*100:.2f}%")
+    print(f"\n  --- Compressed Model (MCU Deployment, Table 10/11) ---")
+    print(f"  Behavior Accuracy: {lc['accuracy_mean']*100:.2f}% ± {lc.get('accuracy_std',0)*100:.2f}%")
     print(f"  Runtime Cluster Accuracy: {lc['cluster_accuracy_mean']*100:.2f}%")
     print(f"  Effective ODR: {lc['eff_odr_mean']:.2f} Hz")
     print(f"  Inference Rate: {lc['inference_rate_mean']*100:.1f}%")
@@ -501,25 +482,17 @@ def main():
     print(f"  Energy Savings: {lc['savings_vs_50hz']:.1f}%")
 
     print(f"\n  --- Full Model (Reference) ---")
-    print(f"  Behavior Accuracy: {le['accuracy_mean']*100:.2f}%")
+    print(f"  Behavior Accuracy: {le['accuracy_mean']*100:.2f}% ± {le['accuracy_std']*100:.2f}%")
     print(f"  Runtime Cluster Accuracy: {le['cluster_accuracy_mean']*100:.2f}%")
     print(f"  Effective ODR: {le['eff_odr_mean']:.2f} Hz")
     print(f"  Energy: {le['energy_mean']:.0f} mJ/day")
     print(f"  Energy Savings: {le['savings_vs_50hz']:.1f}%")
 
-    # Summary
     print("\n" + "=" * 70)
     print("ENERGY MODEL PARAMETERS")
     print("=" * 70)
     print(f"  T_INFERENCE = {T_INFERENCE*1000:.3f} ms (cycle-accurate from Renode DWT)")
     print(f"  Baseline 50Hz energy: {baseline_energy[50]} mJ/day, {baseline_battery[50]} days")
-    print(f"\n  Python FSM Simulation (this run):")
-    print(f"    Cluster Acc: {le['cluster_accuracy_mean']*100:.2f}% | "
-          f"Behavior Acc: {le['accuracy_mean']*100:.2f}% | "
-          f"Eff ODR: {le['eff_odr_mean']:.1f} Hz")
-    print(f"    Inf Rate: {le['inference_rate_mean']*100:.1f}% | "
-          f"Energy: {le['energy_mean']:.0f} mJ | "
-          f"Battery: {le['battery_mean']:.0f}d")
 
     with open(OUTPUT_DIR / 'verified_results.json', 'w') as f:
         json.dump(summary, f, indent=2)

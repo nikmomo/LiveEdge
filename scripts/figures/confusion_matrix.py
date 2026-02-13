@@ -2,8 +2,9 @@
 """
 Cluster confusion matrix figure.
 
-Computes confusion matrix from compressed RF (30 trees, depth 8)
-using 5-fold temporal-order CV, matching the main paper results.
+Computes confusion matrix using full behavior RF (100 trees, depth 20)
+with deterministic cluster mapping, 5-fold temporal-order CV,
+matching the main paper architecture.
 """
 
 import sys
@@ -42,7 +43,7 @@ CLUSTER_ORDER = ['STABLE', 'MODERATE', 'ACTIVE']
 
 
 def compute_confusion_matrix():
-    """Compute cluster confusion matrix using compressed RF + temporal CV."""
+    """Compute cluster confusion matrix using behavior RF + cluster mapping + temporal CV."""
     print("[1] Loading data...")
     X = np.load(DATA_DIR / 'windows.npy')[:, :, :3]
     y = np.load(DATA_DIR / 'labels.npy', allow_pickle=True)
@@ -55,34 +56,41 @@ def compute_confusion_matrix():
 
     print("[2] Extracting 24 features...")
     X_features = extract_24_features_batch(X)
-    scaler = StandardScaler()
-    X_scaled = scaler.fit_transform(X_features)
 
-    le = LabelEncoder()
-    y_encoded = le.fit_transform(y_cluster)
+    le_behavior = LabelEncoder()
+    y_behavior_encoded = le_behavior.fit_transform(y)
 
-    print("[3] Running 5-fold temporal CV (compressed RF: 30 trees, depth 8)...")
+    le_cluster = LabelEncoder()
+    y_cluster_encoded = le_cluster.fit_transform(y_cluster)
+
+    print("[3] Running 5-fold temporal CV (full behavior RF: 100 trees, depth 20)...")
     cv = StratifiedKFold(n_splits=5, shuffle=False)
-    y_pred_all = np.zeros_like(y_encoded)
+    y_pred_clusters_all = np.empty(len(y), dtype=y_cluster.dtype)
 
-    for fold, (train_idx, val_idx) in enumerate(cv.split(X_scaled, y_encoded)):
+    for fold, (train_idx, val_idx) in enumerate(cv.split(X_features, y_cluster_encoded)):
+        scaler = StandardScaler()
+        X_train_scaled = scaler.fit_transform(X_features[train_idx])
+        X_val_scaled = scaler.transform(X_features[val_idx])
+
         clf = RandomForestClassifier(
-            n_estimators=30, max_depth=8,
-            class_weight='balanced', random_state=42, n_jobs=-1
+            n_estimators=100, max_depth=20,
+            min_samples_split=5, min_samples_leaf=2,
+            random_state=42, n_jobs=-1
         )
-        clf.fit(X_scaled[train_idx], y_encoded[train_idx])
-        y_pred_all[val_idx] = clf.predict(X_scaled[val_idx])
+        clf.fit(X_train_scaled, y_behavior_encoded[train_idx])
+
+        # Predict behaviors, map to clusters
+        pred_behavior = le_behavior.inverse_transform(clf.predict(X_val_scaled))
+        y_pred_clusters_all[val_idx] = np.array([BEHAVIOR_TO_CLUSTER[b] for b in pred_behavior])
         print(f"    Fold {fold+1}/5 done")
 
-    y_pred_clusters = le.inverse_transform(y_pred_all)
-
     # Build confusion matrix in CLUSTER_ORDER
-    cm = confusion_matrix(y_cluster, y_pred_clusters, labels=CLUSTER_ORDER)
+    cm = confusion_matrix(y_cluster, y_pred_clusters_all, labels=CLUSTER_ORDER)
 
-    accuracy = np.mean(y_cluster == y_pred_clusters)
+    accuracy = np.mean(y_cluster == y_pred_clusters_all)
     print(f"\n  Overall weighted accuracy: {accuracy:.2%}")
 
-    return cm, y_cluster, y_pred_clusters
+    return cm, y_cluster, y_pred_clusters_all
 
 
 def create_confusion_matrix_figure(cm):
@@ -168,7 +176,7 @@ def compute_error_analysis(cm):
 
 def main():
     print("=" * 70)
-    print("Cluster Confusion Matrix (Compressed RF, Temporal CV)")
+    print("Cluster Confusion Matrix (Behavior RF → Cluster Mapping, Temporal CV)")
     print("=" * 70)
 
     cm, y_true, y_pred = compute_confusion_matrix()

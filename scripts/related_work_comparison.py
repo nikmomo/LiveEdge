@@ -337,39 +337,31 @@ def confidence_inference_skip(X_test, y_test_behavior_str,
 
 
 def liveedge_dual_mechanism(X_test, y_test_behavior_str,
-                            behavior_classifier, cluster_classifier,
-                            scaler_behavior, scaler_cluster,
-                            label_encoder_behavior, label_encoder_cluster,
+                            behavior_classifier, scaler,
+                            label_encoder_behavior,
                             k_stability: int = 3) -> Dict:
     """
     LiveEdge: Behavior-driven dual-mechanism optimization.
 
+    Single behavior classifier + deterministic cluster mapping.
     1. ODR Optimization: Adjust ODR based on predicted behavioral cluster
-    2. Inference Skipping: Skip cluster inference in stable states
+    2. Inference Skipping: Skip inference in stable states
 
     Key difference from signal-driven: uses behavioral SEMANTICS, not raw signal.
     """
     n_samples = len(X_test)
 
-    # Pre-compute features at all ODRs
-    features_cache = {}
+    # Pre-compute features and predictions at all ODRs
+    cluster_preds_cache = {}
+    behavior_preds_cache = {}
     for odr in CLUSTER_ODR.values():
         X_resampled = resample_batch(X_test, odr)
         features = extract_features(X_resampled)
-        features_cache[odr] = {
-            'cluster': scaler_cluster.transform(features),
-            'behavior': scaler_behavior.transform(features)
-        }
-
-    # Pre-compute predictions at each ODR
-    cluster_preds_cache = {}
-    behavior_preds_cache = {}
-    for odr, feats in features_cache.items():
-        pred_indices = cluster_classifier.predict(feats['cluster'])
-        cluster_preds_cache[odr] = label_encoder_cluster.inverse_transform(pred_indices)
-
-        pred_indices = behavior_classifier.predict(feats['behavior'])
-        behavior_preds_cache[odr] = label_encoder_behavior.inverse_transform(pred_indices)
+        features_scaled = scaler.transform(features)
+        pred_indices = behavior_classifier.predict(features_scaled)
+        behavior_preds = label_encoder_behavior.inverse_transform(pred_indices)
+        behavior_preds_cache[odr] = behavior_preds
+        cluster_preds_cache[odr] = np.array([BEHAVIOR_TO_CLUSTER[b] for b in behavior_preds])
 
     # FSM State
     current_cluster = None
@@ -467,14 +459,13 @@ def main():
 
         X_train, X_test = X[train_idx], X[test_idx]
         y_train_behavior = y_behavior[train_idx]
-        y_train_cluster = y_cluster_encoded[train_idx]
         y_test_behavior_str = le_behavior.inverse_transform(y_behavior[test_idx])
 
-        # Train classifiers
+        # Train single behavior classifier
         X_train_features = extract_features(X_train)
 
-        scaler_behavior = StandardScaler()
-        X_train_scaled = scaler_behavior.fit_transform(X_train_features)
+        scaler = StandardScaler()
+        X_train_scaled = scaler.fit_transform(X_train_features)
         behavior_classifier = RandomForestClassifier(
             n_estimators=100, max_depth=20,
             min_samples_split=5, min_samples_leaf=2,
@@ -482,48 +473,38 @@ def main():
         )
         behavior_classifier.fit(X_train_scaled, y_train_behavior)
 
-        scaler_cluster = StandardScaler()
-        X_train_cluster_scaled = scaler_cluster.fit_transform(X_train_features)
-        cluster_classifier = RandomForestClassifier(
-            n_estimators=30, max_depth=8,
-            class_weight='balanced',
-            random_state=42, n_jobs=-1
-        )
-        cluster_classifier.fit(X_train_cluster_scaled, y_train_cluster)
-
         # === FIXED-RATE BASELINES ===
         for odr in [50, 25, 12.5, 6.25]:
             result = fixed_rate_baseline(X_test, y_test_behavior_str,
-                                         behavior_classifier, scaler_behavior,
+                                         behavior_classifier, scaler,
                                          le_behavior, odr)
             all_results[result['method']].append(result)
 
         # === SIGNAL-DRIVEN ADAPTIVE ODR ===
         for tau in [0.05, 0.1, 0.2]:
             result = variance_threshold_adaptive(X_test, y_test_behavior_str,
-                                                  behavior_classifier, scaler_behavior,
+                                                  behavior_classifier, scaler,
                                                   le_behavior, variance_threshold=tau)
             all_results[result['method']].append(result)
 
         # === SIGNAL-DRIVEN INFERENCE SKIP ===
         for tau in [0.02, 0.05, 0.1]:
             result = variance_inference_skip(X_test, y_test_behavior_str,
-                                              behavior_classifier, scaler_behavior,
+                                              behavior_classifier, scaler,
                                               le_behavior, variance_threshold=tau)
             all_results[result['method']].append(result)
 
         # === CONFIDENCE-BASED INFERENCE SKIP ===
         for gamma in [0.7, 0.8, 0.9]:
             result = confidence_inference_skip(X_test, y_test_behavior_str,
-                                                behavior_classifier, scaler_behavior,
+                                                behavior_classifier, scaler,
                                                 le_behavior, confidence_threshold=gamma)
             all_results[result['method']].append(result)
 
         # === LIVEEDGE ===
         result = liveedge_dual_mechanism(X_test, y_test_behavior_str,
-                                          behavior_classifier, cluster_classifier,
-                                          scaler_behavior, scaler_cluster,
-                                          le_behavior, le_cluster, k_stability=3)
+                                          behavior_classifier, scaler,
+                                          le_behavior, k_stability=3)
         all_results[result['method']].append(result)
 
         print(f"    LiveEdge: Acc={result['accuracy']*100:.1f}%, "
